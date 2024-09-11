@@ -29,7 +29,7 @@ plot2
 
 hourly_count <- training_data |>
   group_by(weather) |>
-  summarise(n = n(), count = sum(count))
+  summarise(n = n(), count = sum(count) / n)
 
 plot3 <- ggplot(data = hourly_count, aes(x = factor(weather), y = count)) +
   geom_col(aes(fill = factor(weather))) +
@@ -64,3 +64,24 @@ plot5
 final_plot <- (plot2 + plot3) / (plot4 + plot5)
 
 final_plot
+
+# Linear Regression ----------------------------
+
+# Set up and Fit Linear Model
+my_linear_model <- linear_reg() |>
+  set_engine("lm") |>
+  set_mode("regression") |>
+  fit(formula=log(count) ~ season + holiday + workingday + weather + temp + atemp + humidity + windspeed, data=training_data)
+
+# Generate Predictions
+bike_predictions <- predict(my_linear_model, new_data=testing_data)
+
+# Format the Predictions for submission to Kaggle
+kaggle_submission <- bike_predictions |>
+  bind_cols(., testing_data) |>
+  select(datetime, .pred) |>
+  rename(count=.pred) |>
+  mutate(count=pmax(0, count)) |>
+  mutate(datetime=as.character(format(datetime)))
+
+vroom_write(x=kaggle_submission, file="./LinearPreds.csv", delim=",")

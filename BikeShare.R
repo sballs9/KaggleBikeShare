@@ -65,66 +65,85 @@ final_plot <- (plot2 + plot3) / (plot4 + plot5)
 
 final_plot
 
-# Ensure 'weather' is a factor
-training_data$weather <- as.factor(training_data$weather)
-testing_data$weather <- as.factor(testing_data$weather)
-training_data$season <- as.factor(training_data$season)
-testing_data$season <- as.factor(testing_data$season)
-training_data$holiday <- as.factor(training_data$holiday)
-testing_data$holiday <- as.factor(testing_data$holiday)
-training_data$workingday <- as.factor(training_data$workingday)
-testing_data$workingday <- as.factor(testing_data$workingday)
+# Feature Engineering 
 
-# Replace 4th level with 3rd level
-levels(training_data$weather)[4] <- levels(training_data$weather)[3]
-levels(testing_data$weather)[4] <- levels(testing_data$weather)[3]
+# # Ensure 'weather' is a factor
+# training_data$weather <- as.factor(training_data$weather)
+# testing_data$weather <- as.factor(testing_data$weather)
+# training_data$season <- as.factor(training_data$season)
+# testing_data$season <- as.factor(testing_data$season)
+# training_data$holiday <- as.factor(training_data$holiday)
+# testing_data$holiday <- as.factor(testing_data$holiday)
+# training_data$workingday <- as.factor(training_data$workingday)
+# testing_data$workingday <- as.factor(testing_data$workingday)
 
-training_data <- training_data |>
-  mutate(date = as.Date(datetime), hour_of_day = hour(datetime))
+# # Replace 4th level with 3rd level
+# levels(training_data$weather)[4] <- levels(training_data$weather)[3]
+# levels(testing_data$weather)[4] <- levels(testing_data$weather)[3]
 
-training_data <- training_data |>
-  mutate(day=weekdays(date), month=month(date))
+# training_data <- training_data |>
+#   mutate(date = as.Date(datetime), hour_of_day = hour(datetime))
 
-training_data$time_of_day <- as.factor(ifelse(training_data$hour_of_day<7, "night",
-                                       ifelse(training_data$hour_of_day<15, "morning",
-                                       ifelse(training_data$hour_of_day<23, "evening",
-                                       ifelse(training_data$hour_of_day<24, "night")))))
+# training_data <- training_data |>
+#   mutate(day=weekdays(date), month=month(date))
 
-testing_data <- testing_data |>
-  mutate(date = as.Date(datetime), hour_of_day = hour(datetime))
+# training_data$time_of_day <- as.factor(ifelse(training_data$hour_of_day<7, "night",
+#                                        ifelse(training_data$hour_of_day<15, "morning",
+#                                        ifelse(training_data$hour_of_day<23, "evening",
+#                                        ifelse(training_data$hour_of_day<24, "night")))))
 
-testing_data <- testing_data |>
-  mutate(day=weekdays(date), month=month(date))
-
-testing_data$time_of_day <- as.factor(ifelse(testing_data$hour_of_day<7, "night",
-                                      ifelse(testing_data$hour_of_day<15, "morning",
-                                      ifelse(testing_data$hour_of_day<23, "evening",
-                                      ifelse(testing_data$hour_of_day<24, "night")))))
-
-training_data$month <- as.factor(training_data$month)
-testing_data$month <- as.factor(testing_data$month)
-training_data$day <- as.factor(training_data$day)
-testing_data$holiday <- as.factor(testing_data$holiday)
-training_data$time_of_day <- as.factor(training_data$time_of_day)
-testing_data$time_of_day <- as.factor(testing_data$time_of_day)
+# testing_data <- testing_data |>
+#   mutate(date = as.Date(datetime), hour_of_day = hour(datetime))
+# 
+# testing_data <- testing_data |>
+#   mutate(day=weekdays(date), month=month(date))
+# 
+# testing_data$time_of_day <- as.factor(ifelse(testing_data$hour_of_day<7, "night",
+#                                       ifelse(testing_data$hour_of_day<15, "morning",
+#                                       ifelse(testing_data$hour_of_day<23, "evening",
+#                                       ifelse(testing_data$hour_of_day<24, "night")))))
+# 
+# training_data$month <- as.factor(training_data$month)
+# testing_data$month <- as.factor(testing_data$month)
+# training_data$day <- as.factor(training_data$day)
+# testing_data$holiday <- as.factor(testing_data$holiday)
+# training_data$time_of_day <- as.factor(training_data$time_of_day)
+# testing_data$time_of_day <- as.factor(testing_data$time_of_day)
 
 # Linear Regression ----------------------------
 
-# Set up and fit linear model
+training_data <- vroom("train.csv")
+testing_data <- vroom("test.csv")
+
+training_data <- training_data %>%
+  select(-casual, -registered) %>%
+  mutate(count = log(count))
+
+my_recipe <- recipe(count ~ ., data = training_data) %>%
+  step_mutate(weather = ifelse(weather == 4, 3, weather)) %>%
+  step_mutate(weather = factor(weather)) %>%
+  step_time(datetime, features=c("hour")) %>%
+  step_date(datetime, features=c("month")) %>%
+  step_cut(datetime_hour, breaks=c(7, 15, 24)) %>%
+  step_rm(datetime, atemp, season)
+
+# train_baked <- bake(prep(my_recipe), training_data)
+
 my_linear_model <- linear_reg() |>
   set_engine("lm") |>
-  set_mode("regression") |>
-  fit(formula=log(count) ~ weather + atemp + temp + humidity + windspeed + month + day + time_of_day, data=training_data)
+  set_mode("regression") 
 
-alias(my_linear_model$fit)
-# Generate predictions
-bike_predictions <- predict(my_linear_model, new_data=testing_data)
+bike_workflow <- workflow() %>%
+  add_recipe(my_recipe) %>%
+  add_model(my_linear_model) %>%
+  fit(data = training_data)
+
+bike_predictions <- predict(bike_workflow, new_data = testing_data)
 
 bike_predictions <- exp(bike_predictions)
 
 bike_predictions
 
-# Format the predictions for submission to Kaggle
 kaggle_submission <- bike_predictions %>%
   bind_cols(., testing_data) |>
   select(datetime, .pred) |>
@@ -133,6 +152,7 @@ kaggle_submission <- bike_predictions %>%
   mutate(datetime=as.character(format(datetime)))
 
 vroom_write(x=kaggle_submission, file="./LinearPreds.csv", delim=",")
+
 
 # Poisson Regression -----------------------------
 

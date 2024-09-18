@@ -122,7 +122,9 @@ kaggle_submission <- predictions %>%
 
 vroom_write(x=kaggle_submission, file="./OGLinearPreds.csv", delim=",")
 
-# Linear Regression Using Recipe ----------------------------
+# Penalized Regression using Recipe ----------------------------
+
+install.packages('glmnet')
 
 training_data <- vroom("train.csv")
 testing_data <- vroom("test.csv")
@@ -137,9 +139,33 @@ my_recipe <- recipe(count ~ ., data = training_data) %>%
   step_time(datetime, features=c("hour")) %>%
   step_date(datetime, features=c("month")) %>%
   step_cut(datetime_hour, breaks=c(7, 15, 24)) %>%
-  step_rm(datetime, atemp, season)
+  step_rm(datetime, temp, season, holiday, workingday) %>%
+  step_dummy(all_nominal_predictors()) %>%
+  step_normalize(all_numeric_predictors())
 
-# train_baked <- bake(prep(my_recipe), training_data)
+preg_model <- linear_reg(penalty = 0.01, mixture = 1) %>%
+  set_engine("glmnet")
+
+preg_wf <- workflow() %>%
+  add_recipe(my_recipe) %>%
+  add_model(preg_model) %>%
+  fit(data = training_data)
+
+preg_predictions <- predict(preg_wf, new_data = testing_data)
+
+preg_predictions <- exp(preg_predictions)
+
+kaggle_submission <- preg_predictions %>%
+  bind_cols(., testing_data) |>
+  select(datetime, .pred) |>
+  rename(count=.pred) |>
+  mutate(count=pmax(0, count)) |>
+  mutate(datetime=as.character(format(datetime)))
+
+vroom_write(x=kaggle_submission, file="./PenalizedRegPreds.csv", delim=",")
+
+
+# Simple Linear Regression using Recipe
 
 my_linear_model <- linear_reg() |>
   set_engine("lm") |>

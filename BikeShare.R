@@ -143,15 +143,33 @@ my_recipe <- recipe(count ~ ., data = training_data) %>%
   step_dummy(all_nominal_predictors()) %>%
   step_normalize(all_numeric_predictors())
 
-preg_model <- linear_reg(penalty = 0.01, mixture = 1) %>%
+preg_model <- linear_reg(penalty = tune(), mixture = tune()) %>%
   set_engine("glmnet")
 
 preg_wf <- workflow() %>%
   add_recipe(my_recipe) %>%
-  add_model(preg_model) %>%
-  fit(data = training_data)
+  add_model(preg_model) 
 
-preg_predictions <- predict(preg_wf, new_data = testing_data)
+grid_of_tuning_parameters <- grid_regular(penalty(), mixture(), levels = 5)
+
+folds <- vfold_cv(training_data, v = 10, repeats = 1)
+
+CV_results <- preg_wf %>%
+  tune_grid(resamples = folds, grid = grid_of_tuning_parameters, metrics = metric_set(rmse, mae, rsq))
+
+collect_metrics(CV_results) %>%
+  filter(.metric == 'rmse') %>%
+  ggplot(data = ., aes(x = penalty, y = mean, color = factor(mixture))) +
+  geom_line()
+
+best_tune <- CV_results %>%
+  select_best(metric = "rmse")
+
+final_wf <- preg_wf %>%
+  finalize_workflow(best_tune) %>%
+  fit(training_data)
+
+preg_predictions <- predict(final_wf, new_data = testing_data)
 
 preg_predictions <- exp(preg_predictions)
 

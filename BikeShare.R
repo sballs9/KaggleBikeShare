@@ -136,10 +136,13 @@ training_data <- training_data %>%
 my_recipe <- recipe(count ~ ., data = training_data) %>%
   step_mutate(weather = ifelse(weather == 4, 3, weather)) %>%
   step_mutate(weather = factor(weather)) %>%
+  step_mutate(season = factor(season)) %>%
+  step_mutate(workingday = factor(workingday)) %>%
+  step_mutate(holiday = factor(holiday)) %>%
   step_time(datetime, features=c("hour")) %>%
-  step_date(datetime, features=c("month")) %>%
-  step_cut(datetime_hour, breaks=c(7, 15, 24)) %>%
-  step_rm(datetime, temp, season, holiday, workingday) %>%
+  step_date(datetime, features=c("dow")) %>%
+  step_mutate(datetime_hour = factor(datetime_hour)) %>%
+  step_rm(datetime) %>%
   step_dummy(all_nominal_predictors()) %>%
   step_normalize(all_numeric_predictors())
 
@@ -150,7 +153,7 @@ preg_wf <- workflow() %>%
   add_recipe(my_recipe) %>%
   add_model(preg_model) 
 
-grid_of_tuning_parameters <- grid_regular(penalty(), mixture(), levels = 5)
+grid_of_tuning_parameters <- grid_regular(penalty(), mixture(), levels = 10)
 
 folds <- vfold_cv(training_data, v = 10, repeats = 1)
 
@@ -233,3 +236,76 @@ pois_kaggle_submission <- pois_bike_predictions %>%
   mutate(datetime=as.character(format(datetime)))
 
 vroom_write(x=pois_kaggle_submission, file="./PoisPreds.csv", delim=",")
+
+# Regression Trees
+
+install.packages("rpart")
+library(tidymodels)
+
+training_data <- vroom("train.csv")
+testing_data <- vroom("test.csv")
+
+training_data <- training_data %>%
+  select(-casual, -registered) %>%
+  mutate(count = log(count))
+
+reg_tree_recipe <- recipe(count ~ ., data = training_data) %>%
+  step_mutate(weather = ifelse(weather == 4, 3, weather)) %>%
+  step_mutate(weather = factor(weather)) %>%
+  step_mutate(season = factor(season)) %>%
+  step_mutate(workingday = factor(workingday)) %>%
+  step_mutate(holiday = factor(holiday)) %>%
+  step_time(datetime, features=c("hour")) %>%
+  step_date(datetime, features=c("dow")) %>%
+  step_mutate(datetime_hour = factor(datetime_hour)) %>%
+  step_rm(datetime) %>%
+  step_dummy(all_nominal_predictors()) %>%
+  step_normalize(all_numeric_predictors())
+
+reg_tree_model <- decision_tree(tree_depth = tune(), cost_complexity = tune(), min_n = tune()) %>%
+  set_engine("rpart") %>%
+  set_mode("regression")
+
+reg_tree_wf <- workflow() %>%
+  add_recipe(reg_tree_recipe) %>%
+  add_model(reg_tree_model) 
+
+
+tree_grid <- grid_regular(
+  tree_depth(),         
+  cost_complexity(),    
+  min_n(),               
+  levels = 5                             
+)
+
+cv_folds <- vfold_cv(training_data, v = 5, repeats = 1)
+
+
+tuned_results <- reg_tree_wf |>
+  tune_grid(resamples = cv_folds, 
+            grid = tree_grid, 
+            metrics = metric_set(rmse, rsq))
+
+best_params <- tuned_results |> 
+  select_best(metric = "rmse")
+
+best_params
+
+reg_tree_final_wf <- reg_tree_wf %>% 
+  finalize_workflow(best_params) %>%
+  fit(training_data)
+
+reg_tree_predictions <- predict(reg_tree_final_wf, new_data = testing_data)
+
+reg_tree_predictions <- exp(reg_tree_predictions)
+
+reg_tree_predictions
+
+kaggle_submission <- reg_tree_predictions %>%
+  bind_cols(., testing_data) |>
+  select(datetime, .pred) |>
+  rename(count=.pred) |>
+  mutate(count=pmax(0, count)) |>
+  mutate(datetime=as.character(format(datetime)))
+
+vroom_write(x=kaggle_submission, file="./RegTreePreds.csv", delim=",")

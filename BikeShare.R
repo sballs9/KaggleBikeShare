@@ -188,16 +188,16 @@ vroom_write(x=kaggle_submission, file="./PenalizedRegPreds.csv", delim=",")
 
 # Simple Linear Regression using Recipe
 
-my_linear_model <- linear_reg() |>
+linear_reg_model <- linear_reg() |>
   set_engine("lm") |>
   set_mode("regression") 
 
-bike_workflow <- workflow() %>%
+linear_reg_workflow <- workflow() %>%
   add_recipe(my_recipe) %>%
-  add_model(my_linear_model) %>%
+  add_model(linear_reg_model) %>%
   fit(data = training_data)
 
-bike_predictions <- predict(bike_workflow, new_data = testing_data)
+bike_predictions <- predict(linear_reg_workflow, new_data = testing_data)
 
 bike_predictions <- exp(bike_predictions)
 
@@ -309,3 +309,160 @@ kaggle_submission <- reg_tree_predictions %>%
   mutate(datetime=as.character(format(datetime)))
 
 vroom_write(x=kaggle_submission, file="./RegTreePreds.csv", delim=",")
+
+# Random Forest
+
+install.packages("ranger")
+library(tidymodels)
+
+training_data <- vroom("train.csv")
+testing_data <- vroom("test.csv")
+
+training_data <- training_data %>%
+  select(-casual, -registered) %>%
+  mutate(count = log(count))
+
+rf_recipe <- recipe(count ~ ., data = training_data) %>%
+  step_mutate(weather = ifelse(weather == 4, 3, weather)) %>%
+  step_mutate(weather = factor(weather)) %>%
+  step_mutate(season = factor(season)) %>%
+  step_mutate(workingday = factor(workingday)) %>%
+  step_mutate(holiday = factor(holiday)) %>%
+  step_time(datetime, features=c("hour")) %>%
+  step_date(datetime, features=c("dow")) %>%
+  step_mutate(datetime_hour = factor(datetime_hour)) %>%
+  step_rm(datetime) %>%
+  step_dummy(all_nominal_predictors()) %>%
+  step_normalize(all_numeric_predictors())
+
+rf_model <- rand_forest(mtry = tune(), min_n = tune(), trees = 1000) %>%
+  set_engine("ranger") %>%
+  set_mode("regression")
+
+rf_wf <- workflow() %>%
+  add_recipe(rf_recipe) %>%
+  add_model(rf_model) 
+
+tree_grid <- grid_regular(
+  mtry(range = c(1, 40)), min_n(),             
+  levels = 5                             
+)
+
+cv_folds <- vfold_cv(training_data, v = 5, repeats = 1)
+
+
+tuned_results <- rf_wf |>
+  tune_grid(resamples = cv_folds, 
+            grid = tree_grid, 
+            metrics = metric_set(rmse, rsq))
+
+best_params <- tuned_results |> 
+  select_best(metric = "rmse")
+
+best_params
+
+rf_final_wf <- rf_wf %>% 
+  finalize_workflow(best_params) %>%
+  fit(training_data)
+
+rf_predictions <- predict(rf_final_wf, new_data = testing_data)
+
+rf_predictions <- exp(rf_predictions)
+
+rf_predictions
+
+kaggle_submission <- rf_predictions %>%
+  bind_cols(., testing_data) |>
+  select(datetime, .pred) |>
+  rename(count=.pred) |>
+  mutate(count=pmax(0, count)) |>
+  mutate(datetime=as.character(format(datetime)))
+
+vroom_write(x=kaggle_submission, file="./RandomForestPreds.csv", delim=",")
+
+# Stacking Models
+
+library(tidymodels)
+library(stacks)
+
+training_data <- vroom("train.csv")
+testing_data <- vroom("test.csv")
+
+training_data <- training_data %>%
+  select(-casual, -registered) %>%
+  mutate(count = log(count))
+
+my_recipe <- recipe(count ~ ., data = training_data) %>%
+  step_mutate(weather = ifelse(weather == 4, 3, weather)) %>%
+  step_mutate(weather = factor(weather)) %>%
+  step_mutate(season = factor(season)) %>%
+  step_mutate(workingday = factor(workingday)) %>%
+  step_mutate(holiday = factor(holiday)) %>%
+  step_time(datetime, features=c("hour")) %>%
+  step_date(datetime, features=c("dow")) %>%
+  step_mutate(datetime_hour = factor(datetime_hour)) %>%
+  step_rm(datetime) %>%
+  step_dummy(all_nominal_predictors()) %>%
+  step_normalize(all_numeric_predictors())
+
+folds <- vfold_cv(training_data, v = 5, repeats = 1)
+
+untunedModel <- control_stack_grid() 
+tunedModel <- control_stack_resamples() 
+
+preg_model <- linear_reg(penalty = tune(), mixture = tune()) %>%
+  set_engine("glmnet")
+
+preg_wf <- workflow() %>%
+  add_recipe(my_recipe) %>%
+  add_model(preg_model) 
+
+preg_tuning_grid <- grid_regular(penalty(), mixture(), levels = 10)
+
+preg_models <- preg_wf %>%
+  tune_grid(resamples = folds, grid = preg_tuning_grid, metrics = metric_set(rmse), control = untunedModel)
+
+lin_reg <- linear_reg() |>
+  set_engine("lm")
+
+lin_reg_workflow <- workflow() %>%
+  add_recipe(my_recipe) %>%
+  add_model(lin_reg)
+
+lin_reg_model <- fit_resamples(lin_reg_workflow, resamples = folds, metrics=metric_set(rmse), control = tunedModel)
+
+rf <- rand_forest(mtry = tune(), min_n = tune(), trees = 1000) %>%
+  set_engine("ranger")
+
+rf_wf <- workflow() %>%
+  add_recipe(my_recipe) %>%
+  add_model(rf) 
+
+tree_grid <- grid_regular(
+  mtry(range = c(1, 40)), min_n(),             
+  levels = 5                             
+)
+
+rf_models <- tune_grid(rf_wf, resamples = folds, grid = tree_grid, metrics = metric_set(rmse), control = untunedModel)
+
+my_stack <- stacks() %>%
+  add_candidates(preg_models) %>%
+  add_candidates(lin_reg_model) %>%
+  add_candidates(rf_models)
+
+stack_mod <-my_stack %>%
+  blend_predictions() %>%
+  fit_members()
+ 
+stack_mod_predictions <- predict(stack_mod, new_data = testing_data)
+
+stack_mod_predictions <- exp(stack_mod_predictions)
+
+kaggle_submission <- stack_mod_predictions %>%
+  bind_cols(., testing_data) |>
+  select(datetime, .pred) |>
+  rename(count=.pred) |>
+  mutate(count=pmax(0, count)) |>
+  mutate(datetime=as.character(format(datetime)))
+
+vroom_write(x=kaggle_submission, file="./StackedPreds.csv", delim=",")

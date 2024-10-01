@@ -423,7 +423,8 @@ preg_models <- preg_wf %>%
   tune_grid(resamples = folds, grid = preg_tuning_grid, metrics = metric_set(rmse), control = untunedModel)
 
 lin_reg <- linear_reg() |>
-  set_engine("lm")
+  set_engine("lm") %>%
+  set_mode("regression")
 
 lin_reg_workflow <- workflow() %>%
   add_recipe(my_recipe) %>%
@@ -432,7 +433,8 @@ lin_reg_workflow <- workflow() %>%
 lin_reg_model <- fit_resamples(lin_reg_workflow, resamples = folds, metrics=metric_set(rmse), control = tunedModel)
 
 rf <- rand_forest(mtry = tune(), min_n = tune(), trees = 1000) %>%
-  set_engine("ranger")
+  set_engine("ranger") %>%
+  set_mode("regression")
 
 rf_wf <- workflow() %>%
   add_recipe(my_recipe) %>%
@@ -466,3 +468,126 @@ kaggle_submission <- stack_mod_predictions %>%
   mutate(datetime=as.character(format(datetime)))
 
 vroom_write(x=kaggle_submission, file="./StackedPreds.csv", delim=",")
+
+# XGBoost Model
+
+install.packages("xgboost")
+library(tidymodels)
+
+training_data <- vroom("train.csv")
+testing_data <- vroom("test.csv")
+
+training_data <- training_data %>%
+  select(-casual, -registered) %>%
+  mutate(count = log(count))
+
+my_recipe <- recipe(count ~ ., data = training_data) %>%
+  step_mutate(weather = ifelse(weather == 4, 3, weather)) %>%
+  step_mutate(weather = factor(weather)) %>%
+  step_mutate(season = factor(season)) %>%
+  step_mutate(workingday = factor(workingday)) %>%
+  step_mutate(holiday = factor(holiday)) %>%
+  step_time(datetime, features=c("hour")) %>%
+  step_date(datetime, features=c("dow")) %>%
+  step_mutate(datetime_hour = factor(datetime_hour)) %>%
+  step_rm(datetime) %>%
+  step_dummy(all_nominal_predictors()) %>%
+  step_normalize(all_numeric_predictors())
+
+xgboost_model <- boost_tree(mtry = tune(), min_n = tune(), trees = 500, learn_rate = tune(), tree_depth = tune(), loss_reduction = tune()) %>%
+  set_engine("xgboost") %>%
+  set_mode("regression") %>%
+  translate()
+
+xgboost_wf <- workflow() %>%
+  add_recipe(my_recipe) %>%
+  add_model(xgboost_model) 
+
+tree_grid <- grid_regular(
+  mtry(range = c(1, 40)), 
+  min_n(), 
+  learn_rate(), 
+  tree_depth(), 
+  loss_reduction(),            
+  levels = 5                             
+)
+
+cv_folds <- vfold_cv(training_data, v = 5, repeats = 1)
+
+tuned_results <- xgboost_wf |>
+  tune_grid(resamples = cv_folds, 
+            grid = tree_grid, 
+            metrics = metric_set(rmse))
+
+best_params <- tuned_results |> 
+  select_best(metric = "rmse")
+
+xgboost_final_wf <- xgboost_wf %>% 
+  finalize_workflow(best_params) %>%
+  fit(training_data)
+
+xgboost_predictions <- predict(xgboost_final_wf, new_data = testing_data)
+
+xgboost_predictions <- exp(xgboost_predictions)
+
+xgboost_predictions
+
+kaggle_submission <- xgboost_predictions %>%
+  bind_cols(., testing_data) |>
+  select(datetime, .pred) |>
+  rename(count=.pred) |>
+  mutate(count=pmax(0, count)) |>
+  mutate(datetime=as.character(format(datetime)))
+
+vroom_write(x=kaggle_submission, file="./XGBoostPreds.csv", delim=",")
+
+# BART model
+
+install.packages("dbarts")
+library(tidymodels)
+
+training_data <- vroom("train.csv")
+testing_data <- vroom("test.csv")
+
+training_data <- training_data %>%
+  select(-casual, -registered) %>%
+  mutate(count = log(count))
+
+my_recipe <- recipe(count ~ ., data = training_data) %>%
+  step_mutate(weather = ifelse(weather == 4, 3, weather)) %>%
+  step_mutate(weather = factor(weather)) %>%
+  step_mutate(season = factor(season)) %>%
+  step_mutate(workingday = factor(workingday)) %>%
+  step_time(datetime, features = c("hour")) %>%
+  step_date(datetime, features = c("dow")) %>%
+  step_date(datetime, features = c("month", "year")) %>%
+  step_mutate(datetime_hour = factor(datetime_hour)) %>%
+  step_mutate(datetime_dow = factor(datetime_dow)) %>%
+  step_mutate(datetime_month = factor(datetime_month)) %>%
+  step_mutate(datetime_year = factor(datetime_year)) %>%
+  step_rm(datetime) %>%
+  step_dummy(all_nominal_predictors()) %>%
+  step_normalize(all_numeric_predictors()) 
+
+bart_model <- bart(trees = 1000) %>%
+  set_engine("dbarts") %>%
+  set_mode("regression") %>%
+  translate()
+
+bart_wf <- workflow() %>%
+  add_recipe(my_recipe) %>%
+  add_model(bart_model) %>%
+  fit(training_data)
+
+bart_predictions <- predict(bart_wf, new_data = testing_data)
+
+bart_predictions <- exp(bart_predictions)
+
+kaggle_submission <- bart_predictions %>%
+  bind_cols(., testing_data) |>
+  select(datetime, .pred) |>
+  rename(count=.pred) |>
+  mutate(count=pmax(0, count)) |>
+  mutate(datetime=as.character(format(datetime)))
+
+vroom_write(x=kaggle_submission, file="./BARTPreds.csv", delim=",")

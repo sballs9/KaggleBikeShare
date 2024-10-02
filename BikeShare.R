@@ -564,7 +564,6 @@ my_recipe <- recipe(count ~ ., data = training_data) %>%
   step_mutate(datetime_hour = factor(datetime_hour)) %>%
   step_mutate(datetime_dow = factor(datetime_dow)) %>%
   step_mutate(datetime_month = factor(datetime_month)) %>%
-  step_mutate(datetime_year = factor(datetime_year)) %>%
   step_rm(datetime) %>%
   step_dummy(all_nominal_predictors()) %>%
   step_normalize(all_numeric_predictors()) 
